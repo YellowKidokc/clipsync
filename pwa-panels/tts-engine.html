@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#111827" />
+  <title>TTS Engine Panel</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+    .wrap { padding: 14px; max-width: 760px; margin: 0 auto; }
+    .row { display:flex; gap:8px; margin:8px 0; flex-wrap: wrap; }
+    input, textarea, select, button { background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; }
+    textarea { width:100%; min-height:140px; }
+    .grow { flex:1; }
+    button { cursor:pointer; }
+    .status { margin-top:10px; padding:8px; border-radius:8px; background:#111827; border:1px solid #334155; font-size: 0.9rem; }
+    .muted { color:#94a3b8; font-size:0.85rem; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>TTS Engine (Standalone Panel)</h2>
+  <div class="muted">Hotkeys: Ctrl/Cmd+Enter speak · Alt+S stop · Alt+R repeat · Alt+H dispatch hook</div>
+
+  <div class="row">
+    <select id="voice" class="grow"></select>
+    <input id="rate" type="number" min="0.5" max="2" step="0.1" title="Rate" />
+    <input id="pitch" type="number" min="0" max="2" step="0.1" title="Pitch" />
+    <input id="volume" type="number" min="0" max="1" step="0.1" title="Volume" />
+  </div>
+
+  <textarea id="text" placeholder="Type text to speak..."></textarea>
+
+  <div class="row">
+    <button id="speak">Speak</button>
+    <button id="stop">Stop</button>
+    <button id="repeat">Repeat</button>
+    <button id="dispatch">Dispatch to Hub</button>
+    <button id="copy">Copy Payload</button>
+  </div>
+
+  <div id="status" class="status">Booting…</div>
+</div>
+
+<script>
+(() => {
+  const KEY = 'ttsEnginePanel.v2';
+  const HUB_EVENT = 'aihub:action';
+  const params = new URLSearchParams(location.search);
+  const qsHub = params.get('hub') || '';
+  const qsAction = params.get('action') || 'tts.speak';
+
+  const el = {
+    text: document.getElementById('text'),
+    voice: document.getElementById('voice'),
+    rate: document.getElementById('rate'),
+    pitch: document.getElementById('pitch'),
+    volume: document.getElementById('volume'),
+    speak: document.getElementById('speak'),
+    stop: document.getElementById('stop'),
+    repeat: document.getElementById('repeat'),
+    dispatch: document.getElementById('dispatch'),
+    copy: document.getElementById('copy'),
+    status: document.getElementById('status')
+  };
+
+  let voices = [];
+  let lastText = '';
+
+  function setStatus(msg) { el.status.textContent = msg; }
+
+  function save() {
+    localStorage.setItem(KEY, JSON.stringify({
+      text: el.text.value,
+      voice: el.voice.value,
+      rate: Number(el.rate.value),
+      pitch: Number(el.pitch.value),
+      volume: Number(el.volume.value)
+    }));
+  }
+
+  function restore() {
+    try {
+      const data = JSON.parse(localStorage.getItem(KEY) || '{}');
+      el.text.value = params.get('text') || data.text || '';
+      el.rate.value = params.get('rate') || data.rate || 1;
+      el.pitch.value = params.get('pitch') || data.pitch || 1;
+      el.volume.value = params.get('volume') || data.volume || 1;
+    } catch {
+      el.rate.value = 1; el.pitch.value = 1; el.volume.value = 1;
+    }
+  }
+
+  function loadVoices() {
+    voices = speechSynthesis.getVoices();
+    el.voice.innerHTML = voices.map((v, i) => `<option value="${v.name}">${v.name} (${v.lang})${v.default?' *':''}</option>`).join('');
+    const data = JSON.parse(localStorage.getItem(KEY) || '{}');
+    if (data.voice) el.voice.value = data.voice;
+    if (!el.voice.value && voices[0]) el.voice.value = voices[0].name;
+    setStatus(`Ready. Voices: ${voices.length}`);
+  }
+
+  function speak(text = el.text.value) {
+    if (!text.trim()) return setStatus('Nothing to speak.');
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voices.find(x => x.name === el.voice.value);
+    if (v) u.voice = v;
+    u.rate = Number(el.rate.value || 1);
+    u.pitch = Number(el.pitch.value || 1);
+    u.volume = Number(el.volume.value || 1);
+    u.onstart = () => setStatus('Speaking…');
+    u.onend = () => setStatus('Done.');
+    u.onerror = (e) => setStatus(`TTS error: ${e.error || 'unknown'}`);
+    lastText = text;
+    speechSynthesis.speak(u);
+    save();
+  }
+
+  function stop() { speechSynthesis.cancel(); setStatus('Stopped.'); }
+  function repeat() { speak(lastText || el.text.value); }
+
+  function getPayload(action = qsAction) {
+    return {
+      source: 'tts-engine.html',
+      action,
+      text: el.text.value,
+      voice: el.voice.value,
+      rate: Number(el.rate.value || 1),
+      pitch: Number(el.pitch.value || 1),
+      volume: Number(el.volume.value || 1),
+      timestamp: Date.now()
+    };
+  }
+
+  function dispatchOut(action) {
+    const payload = getPayload(action);
+
+    // 1) DOM custom event (same window listeners)
+    window.dispatchEvent(new CustomEvent(HUB_EVENT, { detail: payload }));
+
+    // 2) localStorage bridge (cross-tab, AHK/browser polling friendly)
+    localStorage.setItem('aihub.lastAction', JSON.stringify(payload));
+
+    // 3) optional URL action for hub page if provided
+    if (qsHub) {
+      const u = new URL(qsHub, location.href);
+      u.searchParams.set('bridge', 'tts');
+      u.searchParams.set('payload', encodeURIComponent(JSON.stringify(payload)));
+      window.open(u.toString(), '_blank');
+    }
+
+    setStatus('Dispatched to outbound bridges.');
+  }
+
+  async function copyPayload() {
+    const txt = JSON.stringify(getPayload(), null, 2);
+    try { await navigator.clipboard.writeText(txt); setStatus('Payload copied.'); }
+    catch { setStatus('Clipboard unavailable in this context.'); }
+  }
+
+  function wire() {
+    ['input','change'].forEach(evt => {
+      el.text.addEventListener(evt, save);
+      el.voice.addEventListener(evt, save);
+      el.rate.addEventListener(evt, save);
+      el.pitch.addEventListener(evt, save);
+      el.volume.addEventListener(evt, save);
+    });
+
+    el.speak.addEventListener('click', () => speak());
+    el.stop.addEventListener('click', stop);
+    el.repeat.addEventListener('click', repeat);
+    el.dispatch.addEventListener('click', () => dispatchOut('tts.dispatch'));
+    el.copy.addEventListener('click', copyPayload);
+
+    window.addEventListener('keydown', (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === 'Enter') { e.preventDefault(); speak(); }
+      if (e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); stop(); }
+      if (e.altKey && e.key.toLowerCase() === 'r') { e.preventDefault(); repeat(); }
+      if (e.altKey && e.key.toLowerCase() === 'h') { e.preventDefault(); dispatchOut('tts.hotkey'); }
+    });
+
+    window.addEventListener('storage', (e) => {
+      if (e.key === 'aihub.injectText' && e.newValue) {
+        el.text.value = e.newValue;
+        save();
+        setStatus('Injected text received via storage bridge.');
+      }
+    });
+  }
+
+  function boot() {
+    restore();
+    wire();
+    loadVoices();
+    speechSynthesis.onvoiceschanged = loadVoices;
+    setTimeout(loadVoices, 800);
+    setTimeout(loadVoices, 1800);
+    if (params.get('autostart') === '1') speak(params.get('text') || el.text.value);
+    setStatus('Initialized.');
+  }
+
+  if (!('speechSynthesis' in window)) setStatus('SpeechSynthesis not supported in this browser.');
+  boot();
+})();
+</script>
+</body>
+</html>
